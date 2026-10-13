@@ -285,6 +285,14 @@ no proxy
 .TP
 .B P
 using proxy
+.SH CONTENT FILTERING
+If
+.I ~/.surf/filters.json
+exists, surf loads it as WebKit content blocker rules (JSON) and applies
+them to every page. The compiled rules are cached in
+.I ~/.surf/filters/
+and rebuilt when the file changes. Both paths are set in
+.IR config.h .
 .SH ENVIRONMENT
 .B SURF_USERAGENT
 If this variable is set upon startup, surf will use it as the

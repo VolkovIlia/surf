@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <utime.h>
 
 #include <gdk/gdk.h>
 #include <gdk/gdkkeysyms.h>
@@ -145,6 +146,9 @@ typedef struct {
 static void die(const char *errstr, ...);
 static void usage(void);
 static void setup(void);
+static void setupfilter(void);
+static void filterloaded(GObject *o, GAsyncResult *r, gpointer loop);
+static void filtersaved(GObject *o, GAsyncResult *r, gpointer loop);
 static void sigchld(int unused);
 static void sighup(int unused);
 static char *buildfile(const char *path);
@@ -250,6 +254,7 @@ static char *stylefile;
 static const char *useragent;
 static Parameter *curconfig;
 static int modparams[ParameterLast];
+static WebKitUserContentFilter *contentfilter;
 char *argv0;
 
 static ParamName loadtransient[] = {
@@ -398,6 +403,78 @@ setup(void)
 				uriparams[i].config[j] = defconfig[j];
 		}
 	}
+
+	setupfilter();
+}
+
+void
+filterloaded(GObject *o, GAsyncResult *r, gpointer loop)
+{
+	contentfilter = webkit_user_content_filter_store_load_finish(
+	    WEBKIT_USER_CONTENT_FILTER_STORE(o), r, NULL);
+	g_main_loop_quit(loop);
+}
+
+void
+filtersaved(GObject *o, GAsyncResult *r, gpointer loop)
+{
+	GError *err = NULL;
+
+	contentfilter = webkit_user_content_filter_store_save_finish(
+	    WEBKIT_USER_CONTENT_FILTER_STORE(o), r, &err);
+	if (contentfilter) {
+		utime(filterdir, NULL); /* mark compiled rules as current */
+	} else {
+		fprintf(stderr, "Could not compile filter file %s: %s\n",
+		        filterfile, err->message);
+		g_error_free(err);
+	}
+	g_main_loop_quit(loop);
+}
+
+void
+setupfilter(void)
+{
+	WebKitUserContentFilterStore *store;
+	GMainLoop *loop;
+	struct stat fst, dst;
+	GBytes *src;
+	gchar *json;
+	gsize len;
+
+	filterfile = filterfile[0] == '~' ? untildepath(filterfile) :
+	             g_strdup(filterfile);
+	if (stat(filterfile, &fst) < 0)
+		return;
+
+	filterdir = buildpath(filterdir);
+	store = webkit_user_content_filter_store_new(filterdir);
+	loop = g_main_loop_new(NULL, FALSE);
+
+	/* reuse the compiled filter unless filterfile changed since */
+	if (!stat(filterdir, &dst) &&
+	    (dst.st_mtim.tv_sec > fst.st_ctim.tv_sec ||
+	    (dst.st_mtim.tv_sec == fst.st_ctim.tv_sec &&
+	    dst.st_mtim.tv_nsec > fst.st_ctim.tv_nsec))) {
+		webkit_user_content_filter_store_load(store, "surf", NULL,
+		    filterloaded, loop);
+		g_main_loop_run(loop);
+	}
+	if (!contentfilter) {
+		if (g_file_get_contents(filterfile, &json, &len, NULL)) {
+			src = g_bytes_new_take(json, len);
+			webkit_user_content_filter_store_save(store, "surf",
+			    src, NULL, filtersaved, loop);
+			g_main_loop_run(loop);
+			g_bytes_unref(src);
+		} else {
+			fprintf(stderr, "Could not read filter file: %s\n",
+			        filterfile);
+		}
+	}
+
+	g_main_loop_unref(loop);
+	g_object_unref(store);
 }
 
 void
@@ -1117,6 +1194,9 @@ newview(Client *c, WebKitWebView *rv)
 		useragent = webkit_settings_get_user_agent(settings);
 
 		contentmanager = webkit_user_content_manager_new();
+		if (contentfilter)
+			webkit_user_content_manager_add_filter(contentmanager,
+			    contentfilter);
 
 		if (curconfig[Ephemeral].val.i) {
 			context = webkit_web_context_new_ephemeral();
