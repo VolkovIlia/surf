@@ -3,7 +3,6 @@
  * To understand surf, start reading main().
  */
 #include <sys/file.h>
-#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <glib.h>
@@ -21,7 +20,6 @@
 #include <gdk/gdk.h>
 #include <gdk/gdkkeysyms.h>
 #include <gdk/gdkx.h>
-#include <gio/gunixfdlist.h>
 #include <glib/gstdio.h>
 #include <gtk/gtk.h>
 #include <gtk/gtkx.h>
@@ -33,7 +31,6 @@
 #include <glib.h>
 
 #include "arg.h"
-#include "common.h"
 
 #define LENGTH(x)               (sizeof(x) / sizeof(x[0]))
 #define CLEANMASK(mask)         (mask & (MODKEY|GDK_SHIFT_MASK))
@@ -177,13 +174,11 @@ static void updatewinid(Client *c);
 static void handleplumb(Client *c, const char *uri);
 static void newwindow(Client *c, const Arg *a, int noembed);
 static void spawn(Client *c, const Arg *a);
-static void msgext(Client *c, char type, const Arg *a);
 static void destroyclient(Client *c);
 static void cleanup(void);
 
 /* GTK/WebKit */
 static WebKitWebView *newview(Client *c, WebKitWebView *rv);
-static void initwebextensions(WebKitWebContext *wc, Client *c);
 static GtkWidget *createview(WebKitWebView *v, WebKitNavigationAction *a,
                              Client *c);
 static gboolean buttonreleased(GtkWidget *w, GdkEvent *e, Client *c);
@@ -213,8 +208,6 @@ static void downloadstarted(WebKitWebContext *wc, WebKitDownload *d,
                             Client *c);
 static void responsereceived(WebKitDownload *d, GParamSpec *ps, Client *c);
 static void download(Client *c, WebKitURIResponse *r);
-static gboolean viewusrmsgrcv(WebKitWebView *v, WebKitUserMessage *m,
-                              gpointer u);
 static void webprocessterminated(WebKitWebView *v,
                                  WebKitWebProcessTerminationReason r,
                                  Client *c);
@@ -257,7 +250,6 @@ static char *stylefile;
 static const char *useragent;
 static Parameter *curconfig;
 static int modparams[ParameterLast];
-static int spair[2];
 char *argv0;
 
 static ParamName loadtransient[] = {
@@ -327,7 +319,6 @@ usage(void)
 void
 setup(void)
 {
-	GIOChannel *gchanin;
 	GdkDisplay *gdpy;
 	int i, j;
 
@@ -361,17 +352,6 @@ setup(void)
 		cachedir   = buildpath(cachedir);
 
 	gdkkb = gdk_seat_get_keyboard(gdk_display_get_default_seat(gdpy));
-
-	if (socketpair(AF_UNIX, SOCK_DGRAM, 0, spair) < 0) {
-		fputs("Unable to create sockets\n", stderr);
-		spair[0] = spair[1] = -1;
-	} else {
-		gchanin = g_io_channel_unix_new(spair[0]);
-		g_io_channel_set_encoding(gchanin, NULL, NULL);
-		g_io_channel_set_flags(gchanin, g_io_channel_get_flags(gchanin)
-		                       | G_IO_FLAG_NONBLOCK, NULL);
-		g_io_channel_set_close_on_unref(gchanin, TRUE);
-	}
 
 
 	for (i = 0; i < LENGTH(certs); ++i) {
@@ -1053,8 +1033,6 @@ spawn(Client *c, const Arg *a)
 	if (fork() == 0) {
 		if (dpy)
 			close(ConnectionNumber(dpy));
-		close(spair[0]);
-		close(spair[1]);
 		setsid();
 		execvp(((char **)a->v)[0], (char **)a->v);
 		fprintf(stderr, "%s: execvp %s", argv0, ((char **)a->v)[0]);
@@ -1088,8 +1066,6 @@ cleanup(void)
 	while (clients)
 		destroyclient(clients);
 
-	close(spair[0]);
-	close(spair[1]);
 	g_free(cookiefile);
 	g_free(scriptfile);
 	g_free(stylefile);
@@ -1181,8 +1157,6 @@ newview(Client *c, WebKitWebView *rv)
 
 		g_signal_connect(G_OBJECT(context), "download-started",
 		                 G_CALLBACK(downloadstarted), c);
-		g_signal_connect(G_OBJECT(context), "initialize-web-extensions",
-		                 G_CALLBACK(initwebextensions), c);
 
 		v = g_object_new(WEBKIT_TYPE_WEB_VIEW,
 		    "settings", settings,
@@ -1215,8 +1189,6 @@ newview(Client *c, WebKitWebView *rv)
 			 G_CALLBACK(permissionrequested), c);
 	g_signal_connect(G_OBJECT(v), "ready-to-show",
 			 G_CALLBACK(showview), c);
-	g_signal_connect(G_OBJECT(v), "user-message-received",
-			 G_CALLBACK(viewusrmsgrcv), c);
 	g_signal_connect(G_OBJECT(v), "web-process-terminated",
 			 G_CALLBACK(webprocessterminated), c);
 
@@ -1226,12 +1198,6 @@ newview(Client *c, WebKitWebView *rv)
 	setparameter(c, 0, DarkMode, &curconfig[DarkMode].val);
 
 	return v;
-}
-
-void
-initwebextensions(WebKitWebContext *wc, Client *c)
-{
-	webkit_web_context_set_web_extensions_directory(wc, WEBEXTDIR);
 }
 
 GtkWidget *
@@ -1533,30 +1499,6 @@ titlechanged(WebKitWebView *view, GParamSpec *ps, Client *c)
 	updatetitle(c);
 }
 
-gboolean
-viewusrmsgrcv(WebKitWebView *v, WebKitUserMessage *m, gpointer unused)
-{
-	WebKitUserMessage *r;
-	GUnixFDList *gfd;
-	const char *name;
-
-	name = webkit_user_message_get_name(m);
-	if (strcmp(name, "page-created") != 0) {
-		fprintf(stderr, "surf: Unknown UserMessage: %s\n", name);
-		return TRUE;
-	}
-
-	if (spair[1] < 0)
-		return TRUE;
-
-	gfd = g_unix_fd_list_new_from_array(&spair[1], 1);
-	r = webkit_user_message_new_with_fd_list("surf-pipe", NULL, gfd);
-
-	webkit_user_message_send_reply(m, r);
-
-	return TRUE;
-}
-
 void
 mousetargetchanged(WebKitWebView *v, WebKitHitTestResult *h, guint modifiers,
     Client *c)
@@ -1855,37 +1797,26 @@ zoom(Client *c, const Arg *a)
 	curconfig[ZoomLevel].val.f = webkit_web_view_get_zoom_level(c->view);
 }
 
-static void
-msgext(Client *c, char type, const Arg *a)
-{
-	static unsigned char msg[MSGBUFSZ];
-	int ret;
-
-	if (spair[0] < 0)
-		return;
-
-	ret = snprintf(msg, sizeof(msg), "%c%c%c",
-	               (unsigned char)c->pageid, type, (signed char)a->i);
-	if (ret >= sizeof(msg)) {
-		fprintf(stderr, "surf: message too long: %d\n", ret);
-		return;
-	}
-
-	if (send(spair[0], msg, ret, 0) != ret)
-		fprintf(stderr, "surf: error sending: %hhu/%c/%d (%d)\n",
-		        (unsigned char)c->pageid, type, a->i, ret);
-}
-
 void
 scrollv(Client *c, const Arg *a)
 {
-	msgext(c, 'v', a);
+	char js[64];
+
+	snprintf(js, sizeof(js), "window.scrollBy(0,window.innerHeight/100*%d);",
+	         a->i);
+	webkit_web_view_evaluate_javascript(c->view, js, -1, "surf", NULL,
+	    NULL, NULL, NULL);
 }
 
 void
 scrollh(Client *c, const Arg *a)
 {
-	msgext(c, 'h', a);
+	char js[64];
+
+	snprintf(js, sizeof(js), "window.scrollBy(window.innerWidth/100*%d,0);",
+	         a->i);
+	webkit_web_view_evaluate_javascript(c->view, js, -1, "surf", NULL,
+	    NULL, NULL, NULL);
 }
 
 void
