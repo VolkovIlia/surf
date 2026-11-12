@@ -6,6 +6,8 @@ static char *styledir       = "~/.surf/styles/";
 static char *certdir        = "~/.surf/certificates/";
 static char *cachedir       = "~/.surf/cache/";
 static char *cookiefile     = "~/.surf/cookies.txt";
+static char *filterfile     = "~/.surf/filters.json"; /* content blocker rules */
+static char *filterdir      = "~/.surf/filters/";     /* compiled rules */
 
 /* Webkit default features */
 /* Highest priority value will be used.
